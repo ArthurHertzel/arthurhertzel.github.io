@@ -13,7 +13,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const db = new QuickDB();
-const BOT_TOKEN = 'MTI4NDUyMjgxNzIyNzg0OTc0OQ.GSLL_B.1UryLvPGsypinizws2Y5NqQJwWubIYmQC_OcaY'; 
+const BOT_TOKEN = ''; 
 const GUILD_ID = '862311843259351070';
 const OWNER_ID = '758423648901529652';
 
