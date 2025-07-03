@@ -1,1468 +1,455 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fifa Simples 2D</title>
-    <!-- Firebase SDKs -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, addDoc, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-        // Variáveis globais para Firebase, acessíveis no escopo global do script
-        window.firebaseApp = null;
-        window.firebaseAuth = null;
-        window.firebaseDb = null;
-        window.currentUserId = null;
-        window.loggedInUser = null; // Para armazenar o perfil do usuário logado
-
-        // Configuração do Firebase (será fornecida pelo ambiente Canvas)
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-
-        // Inicializa Firebase e autentica
-        window.addEventListener('load', async () => {
-            try {
-                window.firebaseApp = initializeApp(firebaseConfig);
-                window.firebaseAuth = getAuth(window.firebaseApp);
-                window.firebaseDb = getFirestore(window.firebaseApp);
-
-                // Autenticação: tenta com token customizado ou anonimamente
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(window.firebaseAuth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(window.firebaseAuth);
-                }
-
-                onAuthStateChanged(window.firebaseAuth, (user) => {
-                    if (user) {
-                        window.currentUserId = user.uid;
-                        console.log("Firebase autenticado. UID:", window.currentUserId);
-                        // Removed loadUserProfile here, as custom account login/create will set loggedInUser
-                    } else {
-                        window.currentUserId = null;
-                        window.loggedInUser = null; // Ensure loggedInUser is null if auth state changes
-                        console.log("Nenhum usuário autenticado no Firebase.");
-                        updateScoreDisplay();
-                    }
-                });
-
-            } catch (error) {
-                console.error("Erro ao inicializar Firebase ou autenticar:", error);
-                // Exibir mensagem de erro na UI se necessário
-            }
-        });
-
-        // Custom account functions using Firestore
-        window.firebaseCreateUser = async (email, password, username) => {
-            if (!window.firebaseDb) return { success: false, message: "Firebase não inicializado." };
-            // No need for currentUserId check here, as we are creating a new custom user
-            // and not directly linking to the current anonymous Firebase Auth UID in this simplified demo.
-            // The currentUserId is still used for Firestore rules and room creation.
-
-            const customUsersCollectionRef = collection(window.firebaseDb, `artifacts/${appId}/public/data/users_custom_auth`);
-            try {
-                // Check if email already exists
-                const q = query(customUsersCollectionRef, where("email", "==", email));
-                const querySnapshot = await getDocs(q);
-                if (!querySnapshot.empty) {
-                    return { success: false, message: "Email já cadastrado." };
-                }
-
-                // Create a new custom user document
-                const newUserDoc = {
-                    username: username,
-                    email: email,
-                    password: password, // In a real app, hash this password!
-                    createdAt: Date.now(),
-                    // You could add a field to link to Firebase Auth UID if needed:
-                    // firebaseAuthUid: window.currentUserId,
-                };
-                const newUserRef = await addDoc(customUsersCollectionRef, newUserDoc);
-
-                // Set the loggedInUser for the current session
-                window.loggedInUser = { username: username, email: email, docId: newUserRef.id };
-                updateScoreDisplay();
-                return { success: true, message: "Conta criada com sucesso!" };
-            } catch (error) {
-                console.error("Erro ao criar conta customizada:", error);
-                return { success: false, message: error.message };
-            }
-        };
-
-        window.firebaseLoginUser = async (email, password) => {
-            if (!window.firebaseDb) return { success: false, message: "Firebase não inicializado." };
-
-            const customUsersCollectionRef = collection(window.firebaseDb, `artifacts/${appId}/public/data/users_custom_auth`);
-            try {
-                const q = query(customUsersCollectionRef, where("email", "==", email), where("password", "==", password));
-                const querySnapshot = await getDocs(q);
-
-                if (querySnapshot.empty) {
-                    return { success: false, message: "Email ou senha incorretos." };
-                }
-
-                // Assuming email/password is unique for custom accounts, get the first match
-                const userData = querySnapshot.docs[0].data();
-                window.loggedInUser = { username: userData.username, email: userData.email, docId: querySnapshot.docs[0].id };
-                updateScoreDisplay();
-                return { success: true, message: "Login realizado com sucesso!" };
-            } catch (error) {
-                console.error("Erro ao fazer login customizado:", error);
-                return { success: false, message: error.message };
-            }
-        };
-
-        window.createFirestoreRoom = async (hostId) => {
-            if (!window.firebaseDb) return { success: false, message: "Firebase não inicializado." };
-            try {
-                const roomsCollectionRef = collection(window.firebaseDb, `artifacts/${appId}/public/data/rooms`);
-                const newRoomRef = await addDoc(roomsCollectionRef, {
-                    hostId: hostId,
-                    guestId: null,
-                    status: 'waiting',
-                    createdAt: Date.now(),
-                    gameState: {
-                        player1: { x: 0, y: 0, dx: 0, dy: 0 },
-                        player2: { x: 0, y: 0, dx: 0, dy: 0 },
-                        ball: { x: 0, y: 0, dx: 0, dy: 0 },
-                        score1: 0,
-                        score2: 0,
-                    }
-                });
-                return { success: true, roomId: newRoomRef.id };
-            } catch (error) {
-                console.error("Erro ao criar sala:", error);
-                return { success: false, message: error.message };
-            }
-        };
-
-        window.joinFirestoreRoom = async (roomId, guestId) => {
-            if (!window.firebaseDb) return { success: false, message: "Firebase não inicializado." };
-            const roomDocRef = doc(window.firebaseDb, `artifacts/${appId}/public/data/rooms/${roomId}`);
-            try {
-                const docSnap = await getDoc(roomDocRef);
-                if (docSnap.exists() && docSnap.data().status === 'waiting' && docSnap.data().hostId !== guestId) {
-                    await updateDoc(roomDocRef, {
-                        guestId: guestId,
-                        status: 'playing'
-                    });
-                    return { success: true, roomData: docSnap.data() };
-                } else if (docSnap.exists() && docSnap.data().hostId === guestId) {
-                    return { success: true, roomData: docSnap.data() }; // Host rejoining
-                } else {
-                    return { success: false, message: "Sala não encontrada ou já cheia." };
-                }
-            } catch (error) {
-                console.error("Erro ao entrar na sala:", error);
-                return { success: false, message: error.message };
-            }
-        };
-
-        window.listenToRoomChanges = (roomId, callback) => {
-            if (!window.firebaseDb) return null;
-            const roomDocRef = doc(window.firebaseDb, `artifacts/${appId}/public/data/rooms/${roomId}`);
-            return onSnapshot(roomDocRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    callback(docSnap.data());
-                } else {
-                    callback(null); // Sala foi excluída ou não existe
-                }
-            }, (error) => {
-                console.error("Erro ao ouvir mudanças na sala:", error);
-            });
-        };
-
-        window.updateFirestoreGameState = async (roomId, gameState) => {
-            if (!window.firebaseDb) return;
-            const roomDocRef = doc(window.firebaseDb, `artifacts/${appId}/public/data/rooms/${roomId}`);
-            try {
-                await updateDoc(roomDocRef, { gameState: gameState });
-            } catch (error) {
-                console.error("Erro ao atualizar estado do jogo no Firestore:", error);
-            }
-        };
-
-        window.deleteFirestoreRoom = async (roomId) => {
-            if (!window.firebaseDb) return;
-            const roomDocRef = doc(window.firebaseDb, `artifacts/${appId}/public/data/rooms/${roomId}`);
-            try {
-                await deleteDoc(roomDocRef);
-                console.log("Sala excluída:", roomId);
-            } catch (error) {
-                console.error("Erro ao excluir sala:", error);
-            }
-        };
-    </script>
+    <title>Jogo de Futebol 2D</title>
+    <!-- Tailwind CSS CDN for general styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
     <style>
+        /* Estilos personalizados para o corpo e o contêiner do jogo */
         body {
-            margin: 0;
-            overflow: hidden;
             font-family: 'Inter', sans-serif;
-            background-color: #222;
-            color: #eee;
+            background-color: #1a202c; /* Fundo escuro */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            overflow: hidden; /* Evita barras de rolagem */
+        }
+        .game-wrapper {
+            background-color: #2d3748; /* Cor de fundo do wrapper */
+            border-radius: 1.5rem;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.1);
+            padding: 1.5rem;
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
-            min-height: 100vh;
+            gap: 1rem;
         }
         canvas {
-            background-color: #4CAF50; /* Cor do campo de futebol */
-            border: 5px solid #555;
+            background-color: #48bb78; /* Cor do campo de futebol (verde) */
+            border: 5px solid #a0aec0; /* Linha de campo */
+            border-radius: 0.5rem;
             display: block;
-            max-width: 90vw; /* Largura fluida */
-            max-height: 80vh; /* Altura fluida */
-            aspect-ratio: 16 / 9; /* Mantém a proporção de um campo de futebol */
-            border-radius: 10px;
-            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            width: 100%; /* Ocupa a largura total do contêiner */
+            max-width: 800px; /* Largura máxima para desktop */
+            height: auto; /* Altura ajustada automaticamente */
         }
-        #ui {
-            position: absolute;
-            top: 10px;
-            padding: 10px 20px;
-            background: rgba(0, 0, 0, 0.7);
-            border-radius: 8px;
+        .score-board {
             display: flex;
-            gap: 20px;
-            font-size: 24px;
+            justify-content: space-around;
+            width: 100%;
+            max-width: 600px;
+            color: #e2e8f0; /* Cor do texto do placar */
+            font-size: 2.5rem;
             font-weight: bold;
-            color: #fff;
-            border: 1px solid #444;
+            margin-bottom: 1rem;
         }
-        #main-menu, #message-box, #account-modal, #online-lobby-modal, #kickoff-message {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: rgba(0, 0, 0, 0.9);
-            padding: 30px;
-            border-radius: 15px;
-            border: 3px solid #f00;
-            text-align: center;
-            font-size: 28px;
-            color: #fff;
-            z-index: 1000;
-            box-shadow: 0 0 30px rgba(255, 0, 0, 0.7);
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-        }
-        #main-menu button, #message-box button, #account-modal button, #online-lobby-modal button {
-            background-color: #4CAF50;
+        .message-box {
+            background-color: #4299e1; /* Azul para mensagens */
             color: white;
-            padding: 12px 25px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 20px;
-            margin-top: 10px;
-            transition: background-color 0.3s ease, transform 0.1s ease;
-            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
-        }
-        #main-menu button:hover, #message-box button:hover, #account-modal button:hover, #online-lobby-modal button:hover {
-            background-color: #45a049;
-            transform: translateY(-2px);
-        }
-        #main-menu button:active, #message-box button:active, #account-modal button:active, #online-lobby-modal button:active {
-            transform: translateY(0);
-        }
-        #gameCanvas {
-            display: none; /* Esconde o canvas inicialmente */
-        }
-        #online-message {
-            font-size: 18px;
-            color: #ffcc00;
-            margin-top: 10px;
-        }
-        #account-modal input, #online-lobby-modal input {
-            padding: 10px;
-            margin-bottom: 10px;
-            border-radius: 5px;
-            border: 1px solid #ccc;
-            background-color: #333;
-            color: #eee;
-            font-size: 18px;
-        }
-        #account-modal p, #online-lobby-modal p {
-            font-size: 18px;
-            color: #ccc;
-        }
-        #logged-in-user {
-            font-size: 18px;
-            color: #00ff00;
-            margin-top: 10px;
-        }
-        #room-code-display {
-            font-size: 24px;
-            color: #fff;
-            margin-top: 10px;
-            word-break: break-all; /* Quebra texto longo */
-        }
-        #player-list {
-            list-style: none;
-            padding: 0;
-            font-size: 20px;
-        }
-        #player-list li {
-            margin-bottom: 5px;
-        }
-        #kickoff-message {
-            background: rgba(0, 0, 0, 0.7);
-            border: 2px solid #fff;
-            color: #fff;
-            font-size: 40px;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.75rem;
+            font-size: 1.25rem;
             font-weight: bold;
-            padding: 20px 40px;
-            border-radius: 10px;
-            display: none; /* Hidden by default */
+            text-align: center;
+            margin-top: 1rem;
+            min-height: 2.5rem; /* Altura mínima para evitar CLS */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0; /* Começa invisível */
+            transition: opacity 0.5s ease-in-out;
+        }
+        .message-box.show {
+            opacity: 1; /* Torna visível */
+        }
+        .controls-info {
+            color: #cbd5e0; /* Cor do texto das informações de controle */
+            font-size: 1rem;
+            text-align: center;
+            margin-top: 1rem;
         }
     </style>
 </head>
 <body>
-    <div id="ui">
-        <span>Jogador: <span id="player-score">0</span></span>
-        <span>IA: <span id="ai-score">0</span></span>
-        <span id="logged-in-user" style="display: none;"></span>
+    <div class="game-wrapper">
+        <h1 class="text-4xl font-extrabold text-white mb-4">Futebol 2D</h1>
+        <div class="score-board">
+            <span id="player-score">Você: 0</span>
+            <span id="computer-score">Computador: 0</span>
+        </div>
+        <canvas id="gameCanvas"></canvas>
+        <div id="message-box" class="message-box"></div>
+        <div class="controls-info">
+            Use as setas do teclado (↑ ↓ ← →) para mover seu jogador.
+        </div>
     </div>
-
-    <canvas id="gameCanvas"></canvas>
-
-    <div id="main-menu">
-        <h1>Fifa Simples 2D</h1>
-        <button id="play-offline-button">Jogar Offline</button>
-        <button id="play-online-button">Jogar Online</button>
-        <button id="create-account-button">Criar Conta</button>
-        <button id="login-button">Fazer Login</button>
-        <p id="online-message" style="display: none;">O modo online requer um servidor e não está disponível nesta demonstração.</p>
-    </div>
-
-    <div id="account-modal" style="display: none;">
-        <h2 id="account-modal-title"></h2>
-        <input type="text" id="username-input" placeholder="Usuário">
-        <input type="email" id="email-input" placeholder="Email (para login)">
-        <input type="password" id="password-input" placeholder="Senha">
-        <p id="account-message" style="color: red;"></p>
-        <button id="submit-account-button"></button>
-        <button id="cancel-account-button">Cancelar</button>
-    </div>
-
-    <div id="online-lobby-modal" style="display: none;">
-        <h2>Lobby Online</h2>
-        <button id="create-room-button">Criar Sala</button>
-        <input type="text" id="join-room-input" placeholder="Código da Sala">
-        <button id="join-room-button">Entrar na Sala</button>
-        <p id="lobby-message"></p>
-        <p id="room-code-display" style="display: none;"></p>
-        <ul id="player-list"></ul>
-        <button id="start-online-game-button" style="display: none;">Iniciar Jogo Online</button>
-        <button id="leave-room-button" style="display: none;">Sair da Sala</button>
-        <button id="cancel-lobby-button">Voltar ao Menu</button>
-    </div>
-
-    <div id="message-box" class="message-box">
-        <p id="message-text"></p>
-        <button id="restart-button">Reiniciar Jogo</button>
-    </div>
-
-    <div id="kickoff-message" style="display: none;">Saída de Bola!</div>
 
     <script>
-        // --- Configurações do Canvas e Contexto ---
+        // Obtenha a referência ao elemento canvas e seu contexto 2D
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
 
-        // --- Variáveis do Jogo ---
-        let gameWidth, gameHeight;
-        let player, aiPlayer, ball;
-        let playerScore = 0;
-        let aiScore = 0;
-        let gameActive = false; // O jogo não está ativo até iniciar pelo menu
-        let keys = {};
-        let kickCooldown = 0; // Tempo de espera entre chutes
-        let animationFrameId; // Para controlar o loop de animação
-        let isKickoffActive = false; // Para controlar o estado de saída de bola
-        let kickoffTeam = 'player'; // 'player' or 'ai' - quem tem a posse na saída de bola
-        let ballTouchedDuringKickoff = false; // True se a bola foi tocada pelo time da saída de bola
-
-        let isOnlineGame = false;
-        let currentRoomId = null;
-        let isHost = false;
-        let unsubscribeFromRoom = null; // Para unsubscribing do listener do Firestore
-
-        // UI Elements
-        const playerScoreDisplay = document.getElementById('player-score');
-        const aiScoreDisplay = document.getElementById('ai-score');
+        // Obtenha as referências aos elementos do placar e da caixa de mensagem
+        const playerScoreSpan = document.getElementById('player-score');
+        const computerScoreSpan = document.getElementById('computer-score');
         const messageBox = document.getElementById('message-box');
-        const messageText = document.getElementById('message-text');
-        const restartButton = document.getElementById('restart-button');
-        const mainMenu = document.getElementById('main-menu');
-        const playOfflineButton = document.getElementById('play-offline-button');
-        const playOnlineButton = document.getElementById('play-online-button');
-        const createAccountButton = document.getElementById('create-account-button');
-        const loginButton = document.getElementById('login-button');
-        const onlineMessage = document.getElementById('online-message');
-        const uiDisplay = document.getElementById('ui');
-        const loggedInUserDisplay = document.getElementById('logged-in-user');
-        const kickoffMessage = document.getElementById('kickoff-message'); // Novo elemento de mensagem de saída de bola
 
-        // Account Modal Elements
-        const accountModal = document.getElementById('account-modal');
-        const accountModalTitle = document.getElementById('account-modal-title');
-        const usernameInput = document.getElementById('username-input');
-        const emailInput = document.getElementById('email-input'); // Novo input de email
-        const passwordInput = document.getElementById('password-input');
-        const accountMessage = document.getElementById('account-message');
-        const submitAccountButton = document.getElementById('submit-account-button');
-        const cancelAccountButton = document.getElementById('cancel-account-button');
+        // Configurações do jogo
+        const GAME_WIDTH = 800;
+        const GAME_HEIGHT = 500;
+        const PLAYER_SIZE = 20;
+        const BALL_SIZE = 10;
+        const GOAL_WIDTH = 10;
+        const GOAL_HEIGHT = 100;
+        const PLAYER_SPEED = 3;
+        const BALL_SPEED_FACTOR = 0.5; // Fator para a velocidade da bola após o chute
+        const AI_SPEED = 2; // Velocidade do jogador da IA
 
-        // Online Lobby Elements
-        const onlineLobbyModal = document.getElementById('online-lobby-modal');
-        const createRoomButton = document.getElementById('create-room-button');
-        const joinRoomInput = document.getElementById('join-room-input');
-        const joinRoomButton = document.getElementById('join-room-button');
-        const lobbyMessage = document.getElementById('lobby-message');
-        const roomCodeDisplay = document.getElementById('room-code-display');
-        const playerList = document.getElementById('player-list');
-        const startOnlineGameButton = document.getElementById('start-online-game-button');
-        const leaveRoomButton = document.getElementById('leave-room-button');
-        const cancelLobbyButton = document.getElementById('cancel-lobby-button');
+        // Variáveis do jogo
+        let playerScore = 0;
+        let computerScore = 0;
+        let gameActive = true; // Controla se o jogo está ativo (para mensagens de gol)
 
+        // Objeto do jogador
+        const player = {
+            x: GAME_WIDTH / 4,
+            y: GAME_HEIGHT / 2 - PLAYER_SIZE / 2,
+            dx: 0,
+            dy: 0,
+            color: '#ffc107' // Amarelo
+        };
 
-        // --- Constantes do Jogo ---
-        const PLAYER_SIZE_RATIO = 0.03; // Proporção do tamanho do jogador em relação à altura do campo
-        const BALL_RADIUS_RATIO = 0.01; // Proporção do raio da bola em relação à altura do campo
-        const PLAYER_SPEED_RATIO = 0.005; // Proporção da velocidade do jogador
-        const RUN_SPEED_FACTOR = 1.5; // Multiplicador de velocidade ao correr
-        const BALL_FRICTION = 0.98; // Atrito da bola
-        const COLLISION_DAMPING = 0.8; // Amortecimento da colisão
-        const MAX_BALL_SPEED = 15; // Velocidade máxima da bola
-        const AI_SPEED_FACTOR = 0.8; // Velocidade da IA em relação ao jogador
-        const GOAL_WIDTH_RATIO = 0.02; // Largura do poste do gol
-        const GOAL_HEIGHT_RATIO = 0.2; // Altura do gol
-        const KICK_POWER = 15; // Força do chute
-        const KICK_COOLDOWN_TIME = 30; // Tempo de recarga do chute em frames (aprox. 0.5 segundos)
-        const GOALKEEPER_SPEED_FACTOR = 0.6; // Velocidade do goleiro da IA
-        const DRIBBLE_PUSH_FACTOR = 0.05; // Força do "drible" ao empurrar a bola
-        const KICKOFF_DURATION = 1500; // Duração da mensagem de saída de bola em ms
-        const KICKOFF_CENTER_RADIUS = 0.1; // Raio do círculo central para restrição de kickoff (proporção da altura do campo)
+        // Objeto do computador (IA)
+        const computer = {
+            x: GAME_WIDTH * 3 / 4 - PLAYER_SIZE,
+            y: GAME_HEIGHT / 2 - PLAYER_SIZE / 2,
+            dx: 0,
+            dy: 0,
+            color: '#dc3545' // Vermelho
+        };
 
+        // Objeto da bola
+        const ball = {
+            x: GAME_WIDTH / 2,
+            y: GAME_HEIGHT / 2,
+            dx: 0,
+            dy: 0,
+            radius: BALL_SIZE / 2,
+            color: '#ffffff' // Branco
+        };
 
-        // --- Classes de Objetos do Jogo ---
-        class Player {
-            constructor(x, y, color, isAI = false, isGoalie = false) {
-                this.x = x;
-                this.y = y;
-                this.radius = gameHeight * PLAYER_SIZE_RATIO;
-                this.color = color;
-                this.speed = gameHeight * PLAYER_SPEED_RATIO;
-                this.dx = 0;
-                this.dy = 0;
-                this.isAI = isAI;
-                this.isGoalie = isGoalie; // Novo: indica se é um goleiro
-                this.facingAngle = 0; // Ângulo para onde o jogador está "olhando"
-            }
+        // Estado das teclas pressionadas
+        const keys = {
+            ArrowUp: false,
+            ArrowDown: false,
+            ArrowLeft: false,
+            ArrowRight: false
+        };
 
-            draw() {
-                // Desenha o corpo (círculo principal)
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
-                ctx.fillStyle = this.color;
-                ctx.fill();
-                ctx.strokeStyle = '#333';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-                ctx.closePath();
+        // Função para exibir mensagens temporárias
+        function showMessage(msg, duration = 2000) {
+            messageBox.textContent = msg;
+            messageBox.classList.add('show');
+            gameActive = false; // Pausa o jogo para a mensagem
 
-                // Desenha a "cabeça" (círculo menor no topo)
-                const headRadius = this.radius * 0.5; // Reduzido para ser mais discreto
-                ctx.beginPath();
-                ctx.arc(this.x + this.radius * Math.cos(this.facingAngle) * 0.7, // Ajusta posição da cabeça
-                        this.y + this.radius * Math.sin(this.facingAngle) * 0.7,
-                        headRadius, 0, Math.PI * 2);
-                ctx.fillStyle = 'white'; // Cor da cabeça
-                ctx.fill();
-                ctx.strokeStyle = '#333';
-                ctx.lineWidth = 1;
-                ctx.stroke();
-                ctx.closePath();
-
-                // Desenha a direção que o jogador está olhando (linha na frente)
-                ctx.beginPath();
-                ctx.moveTo(this.x, this.y);
-                ctx.lineTo(
-                    this.x + this.radius * Math.cos(this.facingAngle) * 1.2, // Linha um pouco maior
-                    this.y + this.radius * Math.sin(this.facingAngle) * 1.2
-                );
-                ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-                ctx.closePath();
-            }
-
-            update() {
-                let currentSpeed = this.speed;
-                // Opção de correr (Shift)
-                if ((!this.isAI && (keys['ShiftLeft'] || keys['ShiftRight'])) || (this.isAI && this.isGoalie && Math.random() < 0.01)) {
-                    currentSpeed *= RUN_SPEED_FACTOR;
-                }
-
-                this.dx = 0;
-                this.dy = 0;
-
-                if (this.isGoalie) {
-                    const targetY = ball.y;
-                    if (targetY < this.y) {
-                        this.dy = -currentSpeed * GOALKEEPER_SPEED_FACTOR;
-                    } else if (targetY > this.y) {
-                        this.dy = currentSpeed * GOALKEEPER_SPEED_FACTOR;
-                    }
-
-                    // Goalie X movement when running
-                    if ((!this.isAI && (keys['ShiftLeft'] || keys['ShiftRight'])) || (this.isAI && Math.abs(ball.dx) > 5)) { // AI goalie moves X if ball is fast
-                        if (ball.x < this.x) {
-                            this.dx = -currentSpeed * GOALKEEPER_SPEED_FACTOR * 0.5; // Move X mais lento
-                        } else if (ball.x > this.x) {
-                            this.dx = currentSpeed * GOALKEEPER_SPEED_FACTOR * 0.5;
-                        }
-                    }
-
-                    // Limit goalie to their goal area
-                    const goalHeight = gameHeight * GOAL_HEIGHT_RATIO;
-                    this.y = Math.max(gameHeight / 2 - goalHeight / 2 + this.radius, Math.min(gameHeight / 2 + goalHeight / 2 - this.radius, this.y));
-                    
-                    if (this.color === '#3366FF') { // AI Goalie (blue, right side)
-                        this.x = Math.max(gameWidth - (gameWidth * 0.15), Math.min(gameWidth - this.radius, this.x + this.dx)); // Limit to right penalty area
-                    } else { // Player Goalie (orange, left side)
-                        this.x = Math.max(this.radius, Math.min(gameWidth * 0.15, this.x + this.dx)); // Limit to left penalty area
-                    }
-
-                    this.facingAngle = Math.atan2(ball.y - this.y, ball.x - this.x);
-
-                } else { // Field Players (Player and AI)
-                    if (!this.isAI || isOnlineGame) { // Player control or online player
-                        if (keys['KeyW'] || keys['ArrowUp']) this.dy = -currentSpeed;
-                        if (keys['KeyS'] || keys['ArrowDown']) this.dy = currentSpeed;
-                        if (keys['KeyA'] || keys['ArrowLeft']) this.dx = -currentSpeed;
-                        if (keys['KeyD'] || keys['ArrowRight']) this.dx = currentSpeed;
-                    } else { // Offline AI field player
-                        const targetX = ball.x;
-                        const targetY = ball.y;
-                        const randomOffset = (Math.random() - 0.5) * gameHeight * 0.05;
-                        const angle = Math.atan2((targetY + randomOffset) - this.y, (targetX + randomOffset) - this.x);
-                        
-                        this.dx = Math.cos(angle) * currentSpeed * AI_SPEED_FACTOR;
-                        this.dy = Math.sin(angle) * currentSpeed * AI_SPEED_FACTOR;
-
-                        const distanceToBall = Math.sqrt(Math.pow(this.x - ball.x, 2) + Math.pow(this.y - ball.y, 2));
-                        if (distanceToBall > gameWidth * 0.3 && Math.random() < 0.01) {
-                            if (this.color === '#3366FF') {
-                                this.dx = (gameWidth * 0.75 - this.x) > 0 ? currentSpeed * AI_SPEED_FACTOR : -currentSpeed * AI_SPEED_FACTOR;
-                                this.dy = (gameHeight / 2 - this.y) > 0 ? currentSpeed * AI_SPEED_FACTOR : -currentSpeed * AI_SPEED_FACTOR;
-                            }
-                        }
-                    }
-
-                    if (this.dx !== 0 && this.dy !== 0) {
-                        const magnitude = Math.sqrt(this.dx * this.dx + this.dy * this.dy);
-                        this.dx = (this.dx / magnitude) * currentSpeed;
-                        this.dy = (this.dy / magnitude) * currentSpeed;
-                    }
-
-                    this.x += this.dx;
-                    this.y += this.dy;
-
-                    this.x = Math.max(this.radius, Math.min(gameWidth - this.radius, this.x));
-                    this.y = Math.max(this.radius, Math.min(gameHeight - this.radius, this.y));
-
-                    if (!this.isAI && (this.dx !== 0 || this.dy !== 0)) {
-                        this.facingAngle = Math.atan2(this.dy, this.dx);
-                    } else if (this.isAI) {
-                        this.facingAngle = Math.atan2(ball.y - this.y, ball.x - this.x);
-                    }
-
-                    // Dribble Logic
-                    if (!this.isAI && !this.isGoalie && (keys['ShiftLeft'] || keys['ShiftRight'])) {
-                        const distanceToBall = Math.sqrt(Math.pow(this.x - ball.x, 2) + Math.pow(this.y - ball.y, 2));
-                        const dribbleThreshold = this.radius + ball.radius + 5;
-
-                        if (distanceToBall < dribbleThreshold) {
-                            ball.dx += this.dx * DRIBBLE_PUSH_FACTOR;
-                            ball.dy += this.dy * DRIBBLE_PUSH_FACTOR;
-                        }
-                    }
-                }
-            }
-
-            kick(ball) {
-                const distance = Math.sqrt(Math.pow(this.x - ball.x, 2) + Math.pow(this.y - ball.y, 2));
-                if (distance < this.radius + ball.radius + 5 && kickCooldown <= 0) {
-                    const angle = this.facingAngle;
-
-                    ball.dx = KICK_POWER * Math.cos(angle);
-                    ball.dy = KICK_POWER * Math.sin(angle);
-
-                    kickCooldown = KICK_COOLDOWN_TIME;
-                }
-            }
+            setTimeout(() => {
+                messageBox.classList.remove('show');
+                gameActive = true; // Retoma o jogo
+            }, duration);
         }
 
-        class Ball {
-            constructor(x, y) {
-                this.x = x;
-                this.y = y;
-                this.radius = gameHeight * BALL_RADIUS_RATIO;
-                this.dx = 0;
-                this.dy = 0;
-            }
-
-            draw() {
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
-                ctx.fillStyle = '#fff';
-                ctx.fill();
-                ctx.strokeStyle = '#333';
-                ctx.lineWidth = 1;
-                ctx.stroke();
-                ctx.closePath();
-
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.radius * 0.7, 0, Math.PI * 2);
-                ctx.strokeStyle = '#666';
-                ctx.lineWidth = 1;
-                ctx.stroke();
-                ctx.closePath();
-
-                ctx.beginPath();
-                ctx.moveTo(this.x - this.radius, this.y);
-                ctx.lineTo(this.x + this.radius, this.y);
-                ctx.moveTo(this.x, this.y - this.radius);
-                ctx.lineTo(this.x, this.y + this.radius);
-                ctx.strokeStyle = '#666';
-                ctx.lineWidth = 1;
-                ctx.stroke();
-                ctx.closePath();
-            }
-
-            update() {
-                // Durante a saída de bola, a bola fica parada até ser tocada pelo time correto
-                if (isKickoffActive && !ballTouchedDuringKickoff) {
-                    this.dx = 0;
-                    this.dy = 0;
-                    // Mantém a bola no centro durante a saída de bola
-                    this.x = gameWidth / 2;
-                    this.y = gameHeight / 2;
-                    return; // Não aplica movimento ou atrito
-                }
-
-                this.x += this.dx;
-                this.y += this.dy;
-
-                this.dx *= BALL_FRICTION;
-                this.dy *= BALL_FRICTION;
-
-                const currentSpeed = Math.sqrt(this.dx * this.dx + this.dy * this.dy);
-                if (currentSpeed > MAX_BALL_SPEED) {
-                    this.dx = (this.dx / currentSpeed) * MAX_BALL_SPEED;
-                    this.dy = (this.dy / currentSpeed) * MAX_BALL_SPEED;
-                }
-
-                const goalHeight = gameHeight * GOAL_HEIGHT_RATIO;
-
-                if (this.x + this.radius > gameWidth) {
-                    if (this.y > gameHeight / 2 - goalHeight / 2 && this.y < gameHeight / 2 + goalHeight / 2) {
-                        // In goal area, handled by checkGoal
-                    } else {
-                        this.dx *= -1;
-                        this.x = gameWidth - this.radius;
-                    }
-                } else if (this.x - this.radius < 0) {
-                    if (this.y > gameHeight / 2 - goalHeight / 2 && this.y < gameHeight / 2 + goalHeight / 2) {
-                        // In goal area, handled by checkGoal
-                    } else {
-                        this.dx *= -1;
-                        this.x = this.radius;
-                    }
-                }
-
-                if (this.y + this.radius > gameHeight) {
-                    this.dy *= -1;
-                    this.y = gameHeight - this.radius;
-                } else if (this.y - this.radius < 0) {
-                    this.dy *= -1;
-                    this.y = this.radius;
-                }
-
-                const goalPostRadius = gameHeight * GOAL_WIDTH_RATIO / 2;
-
-                const playerGoalPostTop = { x: gameWidth, y: gameHeight / 2 - goalHeight / 2, radius: goalPostRadius };
-                const playerGoalPostBottom = { x: gameWidth, y: gameHeight / 2 + goalHeight / 2, radius: goalPostRadius };
-
-                const aiGoalPostTop = { x: 0, y: gameHeight / 2 - goalHeight / 2, radius: goalPostRadius };
-                const aiGoalPostBottom = { x: 0, y: gameHeight / 2 + goalHeight / 2, radius: goalPostRadius };
-
-                [playerGoalPostTop, playerGoalPostBottom, aiGoalPostTop, aiGoalPostBottom].forEach(post => {
-                    const dx = this.x - post.x;
-                    const dy = this.y - post.y;
-                    const distance = Math.sqrt(dx * dx + dy * dy);
-
-                    if (distance < this.radius + post.radius) {
-                        const normalX = dx / distance;
-                        const normalY = dy / distance;
-                        const overlap = (this.radius + post.radius) - distance;
-
-                        this.x += normalX * overlap;
-                        this.y += normalY * overlap;
-
-                        const dotProduct = this.dx * normalX + this.dy * normalY;
-                        this.dx -= 2 * dotProduct * normalX;
-                        this.dy -= 2 * dotProduct * normalY;
-
-                        this.dx *= COLLISION_DAMPING;
-                        this.dy *= COLLISION_DAMPING;
-                    }
-                });
-            }
-        }
-
-        // --- Funções de Inicialização e Desenho ---
-        function setupGame() {
-            gameWidth = canvas.width;
-            gameHeight = canvas.height;
-
-            player = new Player(gameWidth * 0.25, gameHeight / 2, '#FF5733'); // Laranja para o jogador
-            aiPlayer = new Player(gameWidth * 0.75, gameHeight / 2, '#3366FF', true); // Azul para a IA
-
-            // Goleiros (posição centralizada na linha do gol)
-            playerGoalie = new Player(gameWidth * 0.05, gameHeight / 2, '#FF5733', false, true); // Goleiro do jogador
-            aiGoalie = new Player(gameWidth * 0.95, gameHeight / 2, '#3366FF', true, true); // Goleiro da IA
-
-            ball = new Ball(gameWidth / 2, gameHeight / 2);
-
-            playerScore = 0;
-            aiScore = 0;
-            updateScoreDisplay();
-            kickCooldown = 0; // Reseta o cooldown ao reiniciar
-            isKickoffActive = false; // Garante que não comece em estado de kickoff
-            ballTouchedDuringKickoff = false;
-        }
-
+        // Função para desenhar o campo
         function drawField() {
             // Linhas do campo
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 3;
+            ctx.strokeStyle = '#e2e8f0'; // Branco acinzentado
+            ctx.lineWidth = 2;
 
-            // Linha central
+            // Linha do meio
             ctx.beginPath();
-            ctx.moveTo(gameWidth / 2, 0);
-            ctx.lineTo(gameWidth / 2, gameHeight);
+            ctx.moveTo(GAME_WIDTH / 2, 0);
+            ctx.lineTo(GAME_WIDTH / 2, GAME_HEIGHT);
             ctx.stroke();
-            ctx.closePath();
 
             // Círculo central
             ctx.beginPath();
-            ctx.arc(gameWidth / 2, gameHeight / 2, gameHeight * KICKOFF_CENTER_RADIUS, 0, Math.PI * 2);
+            ctx.arc(GAME_WIDTH / 2, GAME_HEIGHT / 2, 70, 0, Math.PI * 2);
             ctx.stroke();
-            ctx.closePath();
 
-            // Ponto central
+            // Áreas do gol (retângulos)
+            ctx.strokeRect(0, GAME_HEIGHT / 2 - GOAL_HEIGHT / 2, 50, GOAL_HEIGHT); // Área do gol esquerdo
+            ctx.strokeRect(GAME_WIDTH - 50, GAME_HEIGHT / 2 - GOAL_HEIGHT / 2, 50, GOAL_HEIGHT); // Área do gol direito
+
+            // Gols (linhas mais grossas)
+            ctx.strokeStyle = '#cbd5e0'; // Branco acinzentado
+            ctx.lineWidth = 5;
             ctx.beginPath();
-            ctx.arc(gameWidth / 2, gameHeight / 2, 5, 0, Math.PI * 2);
-            ctx.fillStyle = '#fff';
+            ctx.moveTo(0, GAME_HEIGHT / 2 - GOAL_HEIGHT / 2);
+            ctx.lineTo(GOAL_WIDTH, GAME_HEIGHT / 2 - GOAL_HEIGHT / 2);
+            ctx.lineTo(GOAL_WIDTH, GAME_HEIGHT / 2 + GOAL_HEIGHT / 2);
+            ctx.lineTo(0, GAME_HEIGHT / 2 + GOAL_HEIGHT / 2);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(GAME_WIDTH, GAME_HEIGHT / 2 - GOAL_HEIGHT / 2);
+            ctx.lineTo(GAME_WIDTH - GOAL_WIDTH, GAME_HEIGHT / 2 - GOAL_HEIGHT / 2);
+            ctx.lineTo(GAME_WIDTH - GOAL_WIDTH, GAME_HEIGHT / 2 + GOAL_HEIGHT / 2);
+            ctx.lineTo(GAME_WIDTH, GAME_HEIGHT / 2 + GOAL_HEIGHT / 2);
+            ctx.stroke();
+        }
+
+        // Função para desenhar um jogador
+        function drawPlayer(p) {
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x + PLAYER_SIZE / 2, p.y + PLAYER_SIZE / 2, PLAYER_SIZE / 2, 0, Math.PI * 2);
             ctx.fill();
-            ctx.closePath();
-
-            // Áreas de gol (grandes áreas)
-            const penaltyAreaWidth = gameWidth * 0.2;
-            const penaltyAreaHeight = gameHeight * 0.7;
-
-            // Área do jogador
-            ctx.strokeRect(0, gameHeight / 2 - penaltyAreaHeight / 2, penaltyAreaWidth, penaltyAreaHeight);
-            // Área da IA
-            ctx.strokeRect(gameWidth - penaltyAreaWidth, gameHeight / 2 - penaltyAreaHeight / 2, penaltyAreaWidth, penaltyAreaHeight);
-
-            // Pequenas áreas (área do goleiro)
-            const smallAreaWidth = gameWidth * 0.1;
-            const smallAreaHeight = gameHeight * 0.4;
-
-            // Pequena área do jogador
-            ctx.strokeRect(0, gameHeight / 2 - smallAreaHeight / 2, smallAreaWidth, smallAreaHeight);
-            // Pequena área da IA
-            ctx.strokeRect(gameWidth - smallAreaWidth, gameHeight / 2 - smallAreaHeight / 2, smallAreaWidth, smallAreaHeight);
-
-            // Gols (postes)
-            const goalPostRadius = gameHeight * GOAL_WIDTH_RATIO / 2;
-            const goalHeight = gameHeight * GOAL_HEIGHT_RATIO;
-
-            // Gol do jogador (direita) - Linha de gol
-            ctx.beginPath();
-            ctx.moveTo(gameWidth, gameHeight / 2 - goalHeight / 2);
-            ctx.lineTo(gameWidth, gameHeight / 2 + goalHeight / 2);
+            ctx.strokeStyle = '#000000'; // Contorno preto
+            ctx.lineWidth = 1;
             ctx.stroke();
-            ctx.closePath();
-            // Postes do gol do jogador
-            ctx.beginPath();
-            ctx.arc(gameWidth, gameHeight / 2 - goalHeight / 2, goalPostRadius, 0, Math.PI * 2);
-            ctx.fillStyle = '#fff'; ctx.fill();
-            ctx.arc(gameWidth, gameHeight / 2 + goalHeight / 2, goalPostRadius, 0, Math.PI * 2);
-            ctx.fillStyle = '#fff'; ctx.fill();
-            ctx.closePath();
-
-
-            // Gol da IA (esquerda) - Linha de gol
-            ctx.beginPath();
-            ctx.moveTo(0, gameHeight / 2 - goalHeight / 2);
-            ctx.lineTo(0, gameHeight / 2 + goalHeight / 2);
-            ctx.stroke();
-            ctx.closePath();
-            // Postes do gol da IA
-            ctx.beginPath();
-            ctx.arc(0, gameHeight / 2 - goalHeight / 2, goalPostRadius, 0, Math.PI * 2);
-            ctx.fillStyle = '#fff'; ctx.fill();
-            ctx.arc(0, gameHeight / 2 + goalHeight / 2, goalPostRadius, 0, Math.PI * 2);
-            ctx.fillStyle = '#fff'; ctx.fill();
-            ctx.closePath();
         }
 
-        // --- Lógica de Colisão ---
-        function checkCollision(obj1, obj2) {
-            const dx = obj1.x - obj2.x;
-            const dy = obj1.y - obj2.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            return distance < obj1.radius + obj2.radius;
+        // Função para desenhar a bola
+        function drawBall() {
+            ctx.fillStyle = ball.color;
+            ctx.beginPath();
+            ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#000000'; // Contorno preto
+            ctx.lineWidth = 1;
+            ctx.stroke();
         }
 
-        function resolveCollision(playerObj, ballObj) {
-            const dx = ballObj.x - playerObj.x;
-            const dy = ballObj.y - playerObj.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
+        // Função para atualizar a posição do jogador
+        function updatePlayerPosition(p) {
+            p.x += p.dx;
+            p.y += p.dy;
 
-            // Normalização do vetor de colisão
-            const normalX = dx / distance;
-            const normalY = dy / distance;
+            // Limites da tela para o jogador
+            if (p.x < 0) p.x = 0;
+            if (p.x + PLAYER_SIZE > GAME_WIDTH) p.x = GAME_WIDTH - PLAYER_SIZE;
+            if (p.y < 0) p.y = 0;
+            if (p.y + PLAYER_SIZE > GAME_HEIGHT) p.y = GAME_HEIGHT - PLAYER_SIZE;
+        }
 
-            // Movimento para fora da colisão para evitar que fiquem presos
-            const overlap = (playerObj.radius + ballObj.radius) - distance;
-            ballObj.x += normalX * overlap / 2;
-            ballObj.y += normalY * overlap / 2;
-            playerObj.x -= normalX * overlap / 2;
-            playerObj.y -= normalY * overlap / 2;
+        // Função para o movimento da IA (computador)
+        function updateComputerAI() {
+            // A IA tenta seguir a bola no eixo Y
+            if (ball.y < computer.y) {
+                computer.dy = -AI_SPEED;
+            } else if (ball.y > computer.y + PLAYER_SIZE) {
+                computer.dy = AI_SPEED;
+            } else {
+                computer.dy = 0;
+            }
 
-            // Calculate relative velocity
-            const relVelX = ballObj.dx - playerObj.dx;
-            const relVelY = ballObj.dy - playerObj.dy;
-
-            // Calculate velocity along the normal
-            const velAlongNormal = relVelX * normalX + relVelY * normalY;
-
-            // Do not resolve if velocities are separating
-            if (velAlongNormal > 0) return;
-
-            // Kickoff logic: only kickoffTeam can move the ball initially
-            if (isKickoffActive && !ballTouchedDuringKickoff) {
-                const isKickoffPlayer = (kickoffTeam === 'player' && playerObj === player) ||
-                                       (kickoffTeam === 'ai' && playerObj === aiPlayer);
-                
-                if (!isKickoffPlayer) {
-                    // Opponent cannot move the ball during kickoff
-                    ballObj.dx = 0;
-                    ballObj.dy = 0;
-                    return;
+            // A IA tenta se posicionar horizontalmente para defender ou atacar
+            // Se a bola estiver no campo da IA, ela tenta se aproximar da bola
+            if (ball.x > GAME_WIDTH / 2) {
+                if (ball.x < computer.x) {
+                    computer.dx = -AI_SPEED;
+                } else if (ball.x > computer.x + PLAYER_SIZE) {
+                    computer.dx = AI_SPEED;
                 } else {
-                    // Kickoff player touched the ball
-                    ballTouchedDuringKickoff = true;
+                    computer.dx = 0;
+                }
+            } else {
+                // Se a bola estiver no campo do jogador, a IA volta para a posição defensiva
+                if (computer.x > GAME_WIDTH * 3 / 4 - PLAYER_SIZE) {
+                    computer.dx = -AI_SPEED;
+                } else if (computer.x < GAME_WIDTH * 3 / 4 - PLAYER_SIZE) {
+                    computer.dx = AI_SPEED;
+                } else {
+                    computer.dx = 0;
                 }
             }
 
-            // Calculate impulse scalar
-            const restitution = COLLISION_DAMPING; // Use damping as restitution
-            const impulseScalar = -(1 + restitution) * velAlongNormal;
+            // Limita a IA ao seu lado do campo
+            if (computer.x < GAME_WIDTH / 2) {
+                computer.x = GAME_WIDTH / 2;
+            }
+            if (computer.x + PLAYER_SIZE > GAME_WIDTH) {
+                computer.x = GAME_WIDTH - PLAYER_SIZE;
+            }
 
-            // Apply impulse to ball
-            ballObj.dx += impulseScalar * normalX;
-            ballObj.dy += impulseScalar * normalY;
+            updatePlayerPosition(computer);
+        }
 
-            // Add some of player's velocity to ball (for pushing/dribbling feel)
-            ballObj.dx += playerObj.dx * 0.2; // Small push
-            ballObj.dy += playerObj.dy * 0.2; // Small push
+        // Função para atualizar a posição da bola
+        function updateBallPosition() {
+            ball.x += ball.dx;
+            ball.y += ball.dy;
 
-            // Limit ball speed
-            const currentSpeed = Math.sqrt(ballObj.dx * ballObj.dx + ballObj.dy * ballObj.dy);
-            if (currentSpeed > MAX_BALL_SPEED) {
-                ballObj.dx = (ballObj.dx / currentSpeed) * MAX_BALL_SPEED;
-                ballObj.dy = (ballObj.dy / currentSpeed) * MAX_BALL_SPEED;
+            // Colisão com as paredes superior e inferior
+            if (ball.y - ball.radius < 0 || ball.y + ball.radius > GAME_HEIGHT) {
+                ball.dy *= -1; // Inverte a direção Y
+            }
+
+            // Desaceleração da bola
+            ball.dx *= 0.99;
+            ball.dy *= 0.99;
+
+            // Parar a bola se a velocidade for muito baixa
+            if (Math.abs(ball.dx) < 0.1) ball.dx = 0;
+            if (Math.abs(ball.dy) < 0.1) ball.dy = 0;
+        }
+
+        // Função para detectar colisão entre dois círculos (jogador/bola)
+        function areColliding(circle1, circle2) {
+            const dx = circle1.x - circle2.x;
+            const dy = circle1.y - circle2.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            return distance < circle1.radius + circle2.radius;
+        }
+
+        // Função para lidar com a colisão entre jogador e bola
+        function handleCollision(playerObj, ballObj) {
+            // Calcula o centro do jogador para colisão com a bola
+            const playerCenterX = playerObj.x + PLAYER_SIZE / 2;
+            const playerCenterY = playerObj.y + PLAYER_SIZE / 2;
+
+            // Distância entre os centros
+            const dx = ballObj.x - playerCenterX;
+            const dy = ballObj.y - playerCenterY;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            // Se colidir
+            if (distance < ballObj.radius + PLAYER_SIZE / 2) {
+                // Normaliza a direção do impacto
+                const normalX = dx / distance;
+                const normalY = dy / distance;
+
+                // Calcula a força do "chute" com base na velocidade do jogador
+                const playerSpeedMagnitude = Math.sqrt(playerObj.dx * playerObj.dx + playerObj.dy * playerObj.dy);
+                const kickForce = playerSpeedMagnitude * BALL_SPEED_FACTOR + 3; // Adiciona um mínimo de força
+
+                // Define a nova velocidade da bola na direção do impacto
+                ballObj.dx = normalX * kickForce;
+                ballObj.dy = normalY * kickForce;
+
+                // Move a bola para fora da colisão para evitar que grude
+                const overlap = (ballObj.radius + PLAYER_SIZE / 2) - distance;
+                ballObj.x += normalX * overlap;
+                ballObj.y += normalY * overlap;
             }
         }
 
+        // Função para verificar se a bola entrou no gol
         function checkGoal() {
-            const goalHeight = gameHeight * GOAL_HEIGHT_RATIO;
-            const goalPostRadius = gameHeight * GOAL_WIDTH_RATIO / 2;
-
-            // Gol do Jogador (lado direito - IA marca)
-            if (ball.x + ball.radius > gameWidth - goalPostRadius &&
-                ball.y > gameHeight / 2 - goalHeight / 2 &&
-                ball.y < gameHeight / 2 + goalHeight / 2) {
-                aiScore++;
-                console.log("AI marcou um gol! Placar: Jogador " + playerScore + " - IA " + aiScore); // Debugging
-                updateScoreDisplay();
-                kickoffTeam = 'player'; // Player's team takes kickoff
-                resetBall();
-                if (aiScore >= 5) { // Condição de vitória simples
-                    gameOver("IA Venceu!");
-                } else {
-                    showKickoffMessage(); // Mostra mensagem de saída de bola
-                }
+            // Gol do jogador (bola no gol do computador)
+            if (ball.x + ball.radius > GAME_WIDTH - GOAL_WIDTH &&
+                ball.y > GAME_HEIGHT / 2 - GOAL_HEIGHT / 2 &&
+                ball.y < GAME_HEIGHT / 2 + GOAL_HEIGHT / 2) {
+                playerScore++;
+                playerScoreSpan.textContent = `Você: ${playerScore}`;
+                showMessage('GOL SEU!', 2500);
+                resetBallAndPlayers();
             }
 
-            // Gol da IA (lado esquerdo - Jogador marca)
-            if (ball.x - ball.radius < goalPostRadius &&
-                ball.y > gameHeight / 2 - goalHeight / 2 &&
-                ball.y < gameHeight / 2 + goalHeight / 2) {
-                playerScore++;
-                console.log("Jogador marcou um gol! Placar: Jogador " + playerScore + " - IA " + aiScore); // Debugging
-                updateScoreDisplay();
-                kickoffTeam = 'ai'; // AI's team takes kickoff
-                resetBall();
-                if (playerScore >= 5) { // Condição de vitória simples
-                    gameOver("Você Venceu!");
-                } else {
-                    showKickoffMessage(); // Mostra mensagem de saída de bola
-                }
+            // Gol do computador (bola no gol do jogador)
+            if (ball.x - ball.radius < GOAL_WIDTH &&
+                ball.y > GAME_HEIGHT / 2 - GOAL_HEIGHT / 2 &&
+                ball.y < GAME_HEIGHT / 2 + GOAL_HEIGHT / 2) {
+                computerScore++;
+                computerScoreSpan.textContent = `Computador: ${computerScore}`;
+                showMessage('GOL DO COMPUTADOR!', 2500);
+                resetBallAndPlayers();
             }
         }
 
-        function resetBall() {
-            ball.x = gameWidth / 2;
-            ball.y = gameHeight / 2;
+        // Função para reiniciar a posição da bola e dos jogadores
+        function resetBallAndPlayers() {
+            ball.x = GAME_WIDTH / 2;
+            ball.y = GAME_HEIGHT / 2;
             ball.dx = 0;
             ball.dy = 0;
-            // Reposiciona os jogadores após o gol
-            player.x = gameWidth * 0.25;
-            player.y = gameHeight / 2;
-            aiPlayer.x = gameWidth * 0.75;
-            aiPlayer.y = gameHeight / 2;
-            playerGoalie.y = gameHeight / 2;
-            aiGoalie.y = gameHeight / 2;
-            kickCooldown = 0; // Reseta o cooldown do chute
 
-            isKickoffActive = true; // Ativa o estado de saída de bola
-            ballTouchedDuringKickoff = false; // Ninguém tocou na bola ainda
+            player.x = GAME_WIDTH / 4;
+            player.y = GAME_HEIGHT / 2 - PLAYER_SIZE / 2;
+            player.dx = 0;
+            player.dy = 0;
+
+            computer.x = GAME_WIDTH * 3 / 4 - PLAYER_SIZE;
+            computer.y = GAME_HEIGHT / 2 - PLAYER_SIZE / 2;
+            computer.dx = 0;
+            computer.dy = 0;
         }
 
-        function updateScoreDisplay() {
-            playerScoreDisplay.textContent = playerScore;
-            aiScoreDisplay.textContent = aiScore;
-            if (window.loggedInUser && window.loggedInUser.username) {
-                loggedInUserDisplay.textContent = `Usuário: ${window.loggedInUser.username}`;
-                loggedInUserDisplay.style.display = 'block';
-            } else {
-                loggedInUserDisplay.style.display = 'none';
-            }
-        }
-
-        const showKickoffMessage = () => {
-            kickoffMessage.style.display = 'flex';
-            setTimeout(() => {
-                kickoffMessage.style.display = 'none';
-            }, KICKOFF_DURATION);
-        };
-
-        const gameOver = (message) => {
-            gameActive = false;
-            messageText.textContent = message;
-            messageBox.style.display = 'flex';
-            kickoffMessage.style.display = 'none'; // Garante que a mensagem de saída de bola esteja oculta
-            cancelAnimationFrame(animationFrameId);
-
-            if (isOnlineGame && isHost && currentRoomId) {
-                window.deleteFirestoreRoom(currentRoomId);
-            }
-        };
-
-        const startGameOffline = () => {
-            isOnlineGame = false;
-            mainMenu.style.display = 'none';
-            accountModal.style.display = 'none';
-            onlineLobbyModal.style.display = 'none';
-            messageBox.style.display = 'none'; // Garante que a caixa de mensagem esteja oculta
-            kickoffMessage.style.display = 'none'; // Garante que a mensagem de saída de bola esteja oculta
-            canvas.style.display = 'block';
-            uiDisplay.style.display = 'flex';
-            setupGame();
-            gameActive = true;
-            showKickoffMessage(); // Mostra a mensagem de saída de bola no início do jogo
-            gameLoop();
-        };
-
-        const showOnlineMessage = () => {
-            onlineMessage.style.display = 'block';
-            setTimeout(() => {
-                onlineMessage.style.display = 'none';
-            }, 3000);
-        };
-
-        const restartGame = () => {
-            messageBox.style.display = 'none';
-            startGameOffline();
-        };
-
-        const showAccountModal = (type) => {
-            mainMenu.style.display = 'none';
-            messageBox.style.display = 'none'; // Garante que a caixa de mensagem esteja oculta
-            kickoffMessage.style.display = 'none'; // Garante que a mensagem de saída de bola esteja oculta
-            accountModal.style.display = 'flex';
-            usernameInput.value = '';
-            emailInput.value = '';
-            passwordInput.value = '';
-            accountMessage.textContent = '';
-
-            if (type === 'create') {
-                accountModalTitle.textContent = 'Criar Conta';
-                submitAccountButton.textContent = 'Criar';
-                submitAccountButton.onclick = createAccount;
-            } else if (type === 'login') {
-                accountModalTitle.textContent = 'Fazer Login';
-                submitAccountButton.textContent = 'Login';
-                submitAccountButton.onclick = loginAccount;
-            }
-        };
-
-        const createAccount = () => {
-            const username = usernameInput.value.trim();
-            const email = emailInput.value.trim();
-            const password = passwordInput.value.trim();
-
-            if (username.length < 3 || email.length < 5 || password.length < 6) {
-                accountMessage.textContent = 'Usuário (min 3), Email (min 5) e Senha (min 6) devem ser válidos.';
-                return;
-            }
-
-            window.firebaseCreateUser(email, password, username).then(res => {
-                accountMessage.textContent = res.message;
-                accountMessage.style.color = res.success ? 'green' : 'red';
-                if (res.success) {
-                    setTimeout(() => {
-                        accountModal.style.display = 'none';
-                        mainMenu.style.display = 'flex';
-                        updateScoreDisplay();
-                    }, 1500);
-                }
-            });
-        };
-
-        const loginAccount = () => {
-            const email = emailInput.value.trim();
-            const password = passwordInput.value.trim();
-
-            if (email.length < 5 || password.length < 6) {
-                accountMessage.textContent = 'Email e Senha devem ser válidos.';
-                return;
-            }
-
-            window.firebaseLoginUser(email, password).then(res => {
-                accountMessage.textContent = res.message;
-                accountMessage.style.color = res.success ? 'green' : 'red';
-                if (res.success) {
-                    setTimeout(() => {
-                        accountModal.style.display = 'none';
-                        mainMenu.style.display = 'flex';
-                        updateScoreDisplay();
-                    }, 1500);
-                }
-            });
-        };
-
-        const showOnlineLobby = () => {
-            if (!window.currentUserId) {
-                onlineMessage.textContent = "Você precisa estar logado para jogar online.";
-                onlineMessage.style.display = 'block';
-                setTimeout(() => { onlineMessage.style.display = 'none'; }, 3000);
-                return;
-            }
-            mainMenu.style.display = 'none';
-            messageBox.style.display = 'none'; // Garante que a caixa de mensagem esteja oculta
-            kickoffMessage.style.display = 'none'; // Garante que a mensagem de saída de bola esteja oculta
-            onlineLobbyModal.style.display = 'flex';
-            lobbyMessage.textContent = "";
-            roomCodeDisplay.style.display = 'none';
-            startOnlineGameButton.style.display = 'none';
-            leaveRoomButton.style.display = 'none';
-            playerList.innerHTML = ''; // Limpa a lista de jogadores
-        };
-
-        async function createOnlineRoom() {
-            if (!window.currentUserId) {
-                lobbyMessage.textContent = "Erro: UID do usuário não disponível.";
-                return;
-            }
-            lobbyMessage.textContent = "Criando sala...";
-            const response = await window.createFirestoreRoom(window.currentUserId);
-            if (response.success) {
-                currentRoomId = response.roomId;
-                isHost = true;
-                lobbyMessage.textContent = `Sala criada! Compartilhe o código:`;
-                roomCodeDisplay.textContent = currentRoomId;
-                roomCodeDisplay.style.display = 'block';
-                startOnlineGameButton.style.display = 'none'; // Só aparece quando tiver 2 jogadores
-                leaveRoomButton.style.display = 'block';
-                
-                // Começa a ouvir as mudanças na sala
-                unsubscribeFromRoom = window.listenToRoomChanges(currentRoomId, handleRoomUpdate);
-            } else {
-                lobbyMessage.textContent = `Erro ao criar sala: ${response.message}`;
-            }
-        }
-
-        async function joinOnlineRoom() {
-            if (!window.currentUserId) {
-                lobbyMessage.textContent = "Erro: UID do usuário não disponível.";
-                return;
-            }
-            const roomId = joinRoomInput.value.trim();
-            if (!roomId) {
-                lobbyMessage.textContent = "Por favor, digite um código de sala.";
-                return;
-            }
-            lobbyMessage.textContent = "Entrando na sala...";
-            const response = await window.joinFirestoreRoom(roomId, window.currentUserId);
-            if (response.success) {
-                currentRoomId = roomId;
-                isHost = (response.roomData.hostId === window.currentUserId);
-                lobbyMessage.textContent = `Entrou na sala!`;
-                roomCodeDisplay.textContent = currentRoomId;
-                roomCodeDisplay.style.display = 'block';
-                startOnlineGameButton.style.display = 'none'; // O guest não inicia o jogo
-                leaveRoomButton.style.display = 'block';
-
-                // Começa a ouvir as mudanças na sala
-                unsubscribeFromRoom = window.listenToRoomChanges(currentRoomId, handleRoomUpdate);
-            } else {
-                lobbyMessage.textContent = `Erro ao entrar na sala: ${response.message}`;
-            }
-        }
-
-        function handleRoomUpdate(roomData) {
-            if (!roomData) {
-                // Sala foi excluída
-                lobbyMessage.textContent = "A sala foi fechada pelo host.";
-                roomCodeDisplay.style.display = 'none';
-                startOnlineGameButton.style.display = 'none';
-                leaveRoomButton.style.display = 'none';
-                playerList.innerHTML = '';
-                currentRoomId = null;
-                isHost = false;
-                if (unsubscribeFromRoom) {
-                    unsubscribeFromRoom();
-                    unsubscribeFromRoom = null;
-                }
-                // Se o jogo estava ativo, volta para o menu principal
-                if (gameActive) {
-                    cancelAnimationFrame(animationFrameId);
-                    gameActive = false;
-                    canvas.style.display = 'none';
-                    uiDisplay.style.display = 'none';
-                    mainMenu.style.display = 'flex';
-                }
-                return;
-            }
-
-            playerList.innerHTML = '';
-            const hostLi = document.createElement('li');
-            hostLi.textContent = `Host: ${roomData.hostId.substring(0, 5)}`;
-            playerList.appendChild(hostLi);
-
-            if (roomData.guestId) {
-                const guestLi = document.createElement('li');
-                guestLi.textContent = `Convidado: ${roomData.guestId.substring(0, 5)}`;
-                playerList.appendChild(guestLi);
-                if (isHost) {
-                    startOnlineGameButton.style.display = 'block'; // Host pode iniciar quando há 2 jogadores
-                }
-            } else {
-                startOnlineGameButton.style.display = 'none';
-            }
-
-            if (roomData.status === 'playing' && gameActive === false) {
-                // Se o status da sala mudou para 'playing' e o jogo não está ativo, inicia o jogo online
-                startGameOnline(roomData.gameState);
-            } else if (roomData.status === 'playing' && gameActive === true) {
-                // Se o jogo já está ativo, sincroniza o estado
-                syncGameState(roomData.gameState);
-            }
-        }
-
-        async function startGameOnline(initialGameState = null) {
-            if (!window.currentUserId || !currentRoomId) {
-                lobbyMessage.textContent = "Erro: Não foi possível iniciar o jogo online. Tente novamente.";
-                return;
-            }
-
-            // O host atualiza o status da sala para 'playing'
-            if (isHost) {
-                await window.updateFirestoreGameState(currentRoomId, {
-                    player1: { x: gameWidth * 0.25, y: gameHeight / 2, dx: 0, dy: 0 },
-                    player2: { x: gameWidth * 0.75, y: gameHeight / 2, dx: 0, dy: 0 },
-                    ball: { x: gameWidth / 2, y: gameHeight / 2, dx: 0, dy: 0 },
-                    score1: 0,
-                    score2: 0,
-                });
-                await window.firebaseDb.doc(`artifacts/${window.appId}/public/data/rooms/${currentRoomId}`).update({ status: 'playing' });
-            }
-
-            isOnlineGame = true;
-            onlineLobbyModal.style.display = 'none';
-            canvas.style.display = 'block';
-            uiDisplay.style.display = 'flex';
-            
-            setupGame(); // Inicializa jogadores e bola localmente
-            gameActive = true;
-            showKickoffMessage(); // Mostra a mensagem de saída de bola no início do jogo online
-            gameLoop(); // Inicia o loop de renderização
-
-            // Se for o guest, o estado inicial virá do host
-            if (!isHost && initialGameState) {
-                syncGameState(initialGameState);
-            }
-        }
-
-        function syncGameState(gameState) {
-            if (!gameState) return;
-
-            // Sincroniza a bola
-            ball.x = gameState.ball.x;
-            ball.y = gameState.ball.y;
-            ball.dx = gameState.ball.dx;
-            ball.dy = gameState.ball.dy;
-
-            // Sincroniza jogadores
-            if (isHost) {
-                // Host controla player1, recebe input do player2
-                player.x = gameState.player1.x;
-                player.y = gameState.player1.y;
-                player.dx = gameState.player1.dx;
-                player.dy = gameState.player1.dy;
-
-                aiPlayer.x = gameState.player2.x; // AI player é o player 2 no lado do host
-                aiPlayer.y = gameState.player2.y;
-                aiPlayer.dx = gameState.player2.dx;
-                aiPlayer.dy = gameState.player2.dy;
-            } else {
-                // Guest controla player2, recebe input do player1
-                player.x = gameState.player2.x; // Player é o player 2 no lado do guest
-                player.y = gameState.player2.y;
-                player.dx = gameState.player2.dx;
-                player.dy = gameState.player2.dy;
-
-                aiPlayer.x = gameState.player1.x; // AI player é o player 1 no lado do guest
-                aiPlayer.y = gameState.player1.y;
-                aiPlayer.dx = gameState.player1.dx;
-                aiPlayer.dy = gameState.player1.dy;
-            }
-
-            // Sincroniza placar
-            playerScore = gameState.score1;
-            aiScore = gameState.score2;
-            updateScoreDisplay();
-        }
-
-        async function leaveOnlineRoom() {
-            if (unsubscribeFromRoom) {
-                unsubscribeFromRoom();
-                unsubscribeFromRoom = null;
-            }
-            if (isHost && currentRoomId) {
-                await window.deleteFirestoreRoom(currentRoomId);
-            }
-            currentRoomId = null;
-            isHost = false;
-            isOnlineGame = false;
-            
-            // Volta para o menu principal
-            cancelAnimationFrame(animationFrameId);
-            gameActive = false;
-            canvas.style.display = 'none';
-            uiDisplay.style.display = 'none';
-            mainMenu.style.display = 'flex';
-            onlineLobbyModal.style.display = 'none';
-        }
-
-        // --- Loop Principal do Jogo ---
+        // Loop principal do jogo
         function gameLoop() {
-            if (!gameActive) return;
+            if (gameActive) { // Só atualiza se o jogo estiver ativo
+                // Limpa o canvas
+                ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
 
-            // Se for um jogo online, apenas o host atualiza o estado e envia para o Firestore
-            if (isOnlineGame && !isHost) {
-                // Guests apenas renderizam o estado recebido
-                // O input do guest é enviado para o host, que o processa
-                // A lógica de update dos players e ball é pulada aqui para o guest
-            } else {
-                // Atualiza objetos (offline ou host online)
-                player.update();
-                aiPlayer.update(); // AI no offline, ou player 2 no online (controlado pelo guest)
-                playerGoalie.update();
-                aiGoalie.update();
-                ball.update();
+                // Desenha o campo
+                drawField();
 
-                // Decrementa o cooldown do chute
-                if (kickCooldown > 0) {
-                    kickCooldown--;
-                }
+                // Atualiza a velocidade do jogador com base nas teclas pressionadas
+                player.dx = 0;
+                player.dy = 0;
+                if (keys.ArrowUp) player.dy = -PLAYER_SPEED;
+                if (keys.ArrowDown) player.dy = PLAYER_SPEED;
+                if (keys.ArrowLeft) player.dx = -PLAYER_SPEED;
+                if (keys.ArrowRight) player.dx = PLAYER_SPEED;
 
-                // Lógica de Chute do Jogador
-                if (keys['Space']) { // Tecla de chute
-                    player.kick(ball);
-                    playerGoalie.kick(ball); // Goalie também pode chutar
-                }
+                // Atualiza posições
+                updatePlayerPosition(player);
+                updateComputerAI();
+                updateBallPosition();
 
-                // Lógica de Chute da IA (apenas para offline, no online o player 2 é humano)
-                if (!isOnlineGame) {
-                    const distanceAItoBall = Math.sqrt(Math.pow(aiPlayer.x - ball.x, 2) + Math.pow(aiPlayer.y - ball.y, 2));
-                    if (distanceAItoBall < aiPlayer.radius + ball.radius + 5 && Math.random() < 0.05) {
-                        aiPlayer.kick(ball);
-                    }
-                    const distanceAIGoalieToBall = Math.sqrt(Math.pow(aiGoalie.x - ball.x, 2) + Math.pow(aiGoalie.y - ball.y, 2));
-                    if (distanceAIGoalieToBall < aiGoalie.radius + ball.radius + 5 && Math.random() < 0.03) { // Chance menor para goleiro chutar
-                        aiGoalie.kick(ball);
-                    }
-                }
+                // Lida com colisões
+                handleCollision(player, ball);
+                handleCollision(computer, ball);
 
-                // Lógica de Colisão
-                if (checkCollision(player, ball)) {
-                    resolveCollision(player, ball);
-                }
-                if (checkCollision(aiPlayer, ball)) {
-                    resolveCollision(aiPlayer, ball);
-                }
-                if (checkCollision(playerGoalie, ball)) {
-                    resolveCollision(playerGoalie, ball);
-                }
-                if (checkCollision(aiGoalie, ball)) {
-                    resolveCollision(aiGoalie, ball);
-                }
-
-                // Verifica Gols
+                // Verifica gols
                 checkGoal();
 
-                // Se for online e host, envia o estado atualizado para o Firestore
-                if (isOnlineGame && isHost) {
-                    window.updateFirestoreGameState(currentRoomId, {
-                        player1: { x: player.x, y: player.y, dx: player.dx, dy: player.dy },
-                        player2: { x: aiPlayer.x, y: aiPlayer.y, dx: aiPlayer.dx, dy: aiPlayer.dy }, // aiPlayer é o player 2
-                        ball: { x: ball.x, y: ball.y, dx: ball.dx, dy: ball.dy },
-                        score1: playerScore,
-                        score2: aiScore,
-                    });
-                }
+                // Desenha elementos
+                drawPlayer(player);
+                drawPlayer(computer);
+                drawBall();
             }
 
-            // Desenha tudo
-            ctx.clearRect(0, 0, gameWidth, gameHeight); // Limpa o canvas
-            drawField();
-            player.draw();
-            aiPlayer.draw();
-            playerGoalie.draw(); // Desenha o goleiro do jogador
-            aiGoalie.draw(); // Desenha o goleiro da IA
-            ball.draw();
-
-            animationFrameId = requestAnimationFrame(gameLoop);
+            // Solicita o próximo frame da animação
+            requestAnimationFrame(gameLoop);
         }
 
-        // --- Event Listeners ---
-        window.addEventListener('resize', () => {
-            canvas.width = canvas.offsetWidth;
-            canvas.height = canvas.offsetHeight;
-            if (gameActive) {
-                setupGame();
-            }
-        });
-
+        // Event listeners para controle do jogador
         document.addEventListener('keydown', (e) => {
-            keys[e.code] = true;
+            if (keys.hasOwnProperty(e.key)) {
+                keys[e.key] = true;
+            }
         });
 
         document.addEventListener('keyup', (e) => {
-            keys[e.code] = false;
-        });
-
-        // Botões do Menu Principal
-        restartButton.addEventListener('click', restartGame);
-        playOfflineButton.addEventListener('click', startGameOffline);
-        playOnlineButton.addEventListener('click', showOnlineLobby); // Abre o lobby online
-        createAccountButton.addEventListener('click', () => showAccountModal('create'));
-        loginButton.addEventListener('click', () => showAccountModal('login'));
-
-        // Botões do Modal de Conta
-        submitAccountButton.addEventListener('click', () => {
-            if (accountModalTitle.textContent === 'Criar Conta') {
-                window.firebaseCreateUser(emailInput.value, passwordInput.value, usernameInput.value).then(res => {
-                    accountMessage.textContent = res.message;
-                    accountMessage.style.color = res.success ? 'green' : 'red';
-                    if (res.success) {
-                        setTimeout(() => {
-                            accountModal.style.display = 'none';
-                            mainMenu.style.display = 'flex';
-                            updateScoreDisplay();
-                        }, 1500);
-                    }
-                });
-            } else if (accountModalTitle.textContent === 'Fazer Login') {
-                window.firebaseLoginUser(emailInput.value, passwordInput.value).then(res => {
-                    accountMessage.textContent = res.message;
-                    accountMessage.style.color = res.success ? 'green' : 'red';
-                    if (res.success) {
-                        setTimeout(() => {
-                            accountModal.style.display = 'none';
-                            mainMenu.style.display = 'flex';
-                            updateScoreDisplay();
-                        }, 1500);
-                    }
-                });
+            if (keys.hasOwnProperty(e.key)) {
+                keys[e.key] = false;
             }
         });
-        cancelAccountButton.addEventListener('click', () => {
-            accountModal.style.display = 'none';
-            mainMenu.style.display = 'flex';
-            onlineMessage.style.display = 'none'; // Garante que a mensagem online esteja oculta
-            messageBox.style.display = 'none'; // Garante que a caixa de mensagem esteja oculta
-            kickoffMessage.style.display = 'none'; // Garante que a mensagem de saída de bola esteja oculta
-        });
 
-        // Botões do Lobby Online
-        createRoomButton.addEventListener('click', createOnlineRoom);
-        joinRoomButton.addEventListener('click', joinOnlineRoom);
-        startOnlineGameButton.addEventListener('click', () => startGameOnline());
-        leaveRoomButton.addEventListener('click', leaveOnlineRoom);
-        cancelLobbyButton.addEventListener('click', () => {
-            onlineLobbyModal.style.display = 'none';
-            mainMenu.style.display = 'flex';
-            onlineMessage.style.display = 'none';
-            messageBox.style.display = 'none'; // Garante que a caixa de mensagem esteja oculta
-            kickoffMessage.style.display = 'none'; // Garante que a mensagem de saída de bola esteja oculta
-            if (unsubscribeFromRoom) { // Garante que o listener seja desativado ao sair do lobby
-                unsubscribeFromRoom();
-                unsubscribeFromRoom = null;
-            }
-            if (isHost && currentRoomId) { // Se o host sair, tenta deletar a sala
-                window.deleteFirestoreRoom(currentRoomId);
-            }
-            currentRoomId = null;
-            isHost = false;
-        });
+        // Adapta o tamanho do canvas ao redimensionar a janela
+        function resizeCanvas() {
+            const containerWidth = canvas.parentElement.clientWidth;
+            canvas.width = Math.min(GAME_WIDTH, containerWidth);
+            canvas.height = (canvas.width / GAME_WIDTH) * GAME_HEIGHT;
 
+            // Redesenha tudo após o redimensionamento
+            drawField();
+            drawPlayer(player);
+            drawPlayer(computer);
+            drawBall();
+        }
 
-        // Inicializa o jogo no carregamento da janela
-        window.addEventListener('load', () => {
-            canvas.width = 800; // Tamanho padrão inicial
-            canvas.height = 450; // Tamanho padrão inicial (16:9)
-
-            uiDisplay.style.display = 'none'; // Esconde a UI do placar inicialmente
-            mainMenu.style.display = 'flex'; // Mostra o menu principal
-            messageBox.style.display = 'none'; // Garante que a caixa de mensagem esteja oculta no carregamento
-            accountModal.style.display = 'none'; // Garante que o modal de conta esteja oculto
-            onlineLobbyModal.style.display = 'none'; // Garante que o lobby online esteja oculto
-            kickoffMessage.style.display = 'none'; // Garante que a mensagem de saída de bola esteja oculta no carregamento
-        });
+        // Inicia o jogo quando a janela carregar
+        window.onload = function () {
+            resizeCanvas(); // Define o tamanho inicial
+            window.addEventListener('resize', resizeCanvas); // Adiciona listener para redimensionamento
+            gameLoop(); // Inicia o loop do jogo
+        };
     </script>
 </body>
 </html>
