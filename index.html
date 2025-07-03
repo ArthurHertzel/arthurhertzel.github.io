@@ -383,6 +383,8 @@
         let kickCooldown = 0; // Tempo de espera entre chutes
         let animationFrameId; // Para controlar o loop de animação
         let isKickoffActive = false; // Para controlar o estado de saída de bola
+        let kickoffTeam = 'player'; // 'player' or 'ai' - quem tem a posse na saída de bola
+        let ballTouchedDuringKickoff = false; // True se a bola foi tocada pelo time da saída de bola
 
         let isOnlineGame = false;
         let currentRoomId = null;
@@ -432,6 +434,7 @@
         const PLAYER_SIZE_RATIO = 0.03; // Proporção do tamanho do jogador em relação à altura do campo
         const BALL_RADIUS_RATIO = 0.01; // Proporção do raio da bola em relação à altura do campo
         const PLAYER_SPEED_RATIO = 0.005; // Proporção da velocidade do jogador
+        const RUN_SPEED_FACTOR = 1.5; // Multiplicador de velocidade ao correr
         const BALL_FRICTION = 0.98; // Atrito da bola
         const COLLISION_DAMPING = 0.8; // Amortecimento da colisão
         const MAX_BALL_SPEED = 15; // Velocidade máxima da bola
@@ -443,6 +446,8 @@
         const GOALKEEPER_SPEED_FACTOR = 0.6; // Velocidade do goleiro da IA
         const DRIBBLE_PUSH_FACTOR = 0.05; // Força do "drible" ao empurrar a bola
         const KICKOFF_DURATION = 1500; // Duração da mensagem de saída de bola em ms
+        const KICKOFF_CENTER_RADIUS = 0.1; // Raio do círculo central para restrição de kickoff (proporção da altura do campo)
+
 
         // --- Classes de Objetos do Jogo ---
         class Player {
@@ -497,95 +502,92 @@
             }
 
             update() {
+                let currentSpeed = this.speed;
+                // Opção de correr (Shift)
+                if ((!this.isAI && (keys['ShiftLeft'] || keys['ShiftRight'])) || (this.isAI && this.isGoalie && Math.random() < 0.01)) {
+                    currentSpeed *= RUN_SPEED_FACTOR;
+                }
+
+                this.dx = 0;
+                this.dy = 0;
+
                 if (this.isGoalie) {
-                    // Lógica do Goleiro da IA: move-se horizontalmente para bloquear a bola
                     const targetY = ball.y;
-                    const goalieSpeed = this.speed * GOALKEEPER_SPEED_FACTOR;
-
                     if (targetY < this.y) {
-                        this.dy = -goalieSpeed;
+                        this.dy = -currentSpeed * GOALKEEPER_SPEED_FACTOR;
                     } else if (targetY > this.y) {
-                        this.dy = goalieSpeed;
-                    } else {
-                        this.dy = 0;
+                        this.dy = currentSpeed * GOALKEEPER_SPEED_FACTOR;
                     }
-                    this.dx = 0; // Goleiro só se move no eixo Y
 
-                    this.y += this.dy;
+                    // Goalie X movement when running
+                    if ((!this.isAI && (keys['ShiftLeft'] || keys['ShiftRight'])) || (this.isAI && Math.abs(ball.dx) > 5)) { // AI goalie moves X if ball is fast
+                        if (ball.x < this.x) {
+                            this.dx = -currentSpeed * GOALKEEPER_SPEED_FACTOR * 0.5; // Move X mais lento
+                        } else if (ball.x > this.x) {
+                            this.dx = currentSpeed * GOALKEEPER_SPEED_FACTOR * 0.5;
+                        }
+                    }
 
-                    // Limita o goleiro à área do gol
+                    // Limit goalie to their goal area
                     const goalHeight = gameHeight * GOAL_HEIGHT_RATIO;
                     this.y = Math.max(gameHeight / 2 - goalHeight / 2 + this.radius, Math.min(gameHeight / 2 + goalHeight / 2 - this.radius, this.y));
                     
-                    // Mantém o goleiro na posição X do gol
-                    if (this.color === '#3366FF') { // Goleiro da IA (azul, lado direito)
-                        this.x = gameWidth - (gameWidth * 0.15 / 2); // Centraliza no gol da IA
-                    } else { // Goleiro do jogador (laranja, lado esquerdo)
-                        this.x = gameWidth * 0.15 / 2; // Centraliza no gol do jogador
+                    if (this.color === '#3366FF') { // AI Goalie (blue, right side)
+                        this.x = Math.max(gameWidth - (gameWidth * 0.15), Math.min(gameWidth - this.radius, this.x + this.dx)); // Limit to right penalty area
+                    } else { // Player Goalie (orange, left side)
+                        this.x = Math.max(this.radius, Math.min(gameWidth * 0.15, this.x + this.dx)); // Limit to left penalty area
                     }
-                    
-                    // A IA goleiro sempre "olha" para a bola
+
                     this.facingAngle = Math.atan2(ball.y - this.y, ball.x - this.x);
 
-                } else { // Jogadores de campo (jogador e IA)
-                    this.dx = 0;
-                    this.dy = 0;
-
-                    if (!this.isAI || isOnlineGame) { // Lógica de movimento do jogador ou online
-                        if (keys['KeyW'] || keys['ArrowUp']) this.dy = -this.speed;
-                        if (keys['KeyS'] || keys['ArrowDown']) this.dy = this.speed;
-                        if (keys['KeyA'] || keys['ArrowLeft']) this.dx = -this.speed;
-                        if (keys['KeyD'] || keys['ArrowRight']) this.dx = this.speed;
-                    } else { // Lógica de IA para jogadores de campo (offline)
-                        // AI balanceada: persegue a bola, mas com um pouco de aleatoriedade e atraso
+                } else { // Field Players (Player and AI)
+                    if (!this.isAI || isOnlineGame) { // Player control or online player
+                        if (keys['KeyW'] || keys['ArrowUp']) this.dy = -currentSpeed;
+                        if (keys['KeyS'] || keys['ArrowDown']) this.dy = currentSpeed;
+                        if (keys['KeyA'] || keys['ArrowLeft']) this.dx = -currentSpeed;
+                        if (keys['KeyD'] || keys['ArrowRight']) this.dx = currentSpeed;
+                    } else { // Offline AI field player
                         const targetX = ball.x;
                         const targetY = ball.y;
-
-                        // Adiciona um pequeno atraso ou imprecisão à IA
-                        const randomOffset = (Math.random() - 0.5) * gameHeight * 0.05; // Pequeno desvio
+                        const randomOffset = (Math.random() - 0.5) * gameHeight * 0.05;
                         const angle = Math.atan2((targetY + randomOffset) - this.y, (targetX + randomOffset) - this.x);
                         
-                        this.dx = Math.cos(angle) * this.speed * AI_SPEED_FACTOR;
-                        this.dy = Math.sin(angle) * this.speed * AI_SPEED_FACTOR;
+                        this.dx = Math.cos(angle) * currentSpeed * AI_SPEED_FACTOR;
+                        this.dy = Math.sin(angle) * currentSpeed * AI_SPEED_FACTOR;
 
-                        // Adiciona uma chance da IA se mover para uma posição defensiva se a bola estiver longe
                         const distanceToBall = Math.sqrt(Math.pow(this.x - ball.x, 2) + Math.pow(this.y - ball.y, 2));
-                        if (distanceToBall > gameWidth * 0.3 && Math.random() < 0.01) { // Se a bola estiver longe, 1% de chance de ir para a posição defensiva
-                            if (this.color === '#3366FF') { // IA azul (lado direito)
-                                this.dx = (gameWidth * 0.75 - this.x) > 0 ? this.speed * AI_SPEED_FACTOR : -this.speed * AI_SPEED_FACTOR;
-                                this.dy = (gameHeight / 2 - this.y) > 0 ? this.speed * AI_SPEED_FACTOR : -this.speed * AI_SPEED_FACTOR;
+                        if (distanceToBall > gameWidth * 0.3 && Math.random() < 0.01) {
+                            if (this.color === '#3366FF') {
+                                this.dx = (gameWidth * 0.75 - this.x) > 0 ? currentSpeed * AI_SPEED_FACTOR : -currentSpeed * AI_SPEED_FACTOR;
+                                this.dy = (gameHeight / 2 - this.y) > 0 ? currentSpeed * AI_SPEED_FACTOR : -currentSpeed * AI_SPEED_FACTOR;
                             }
                         }
                     }
 
-                    // Normaliza a velocidade se estiver se movendo diagonalmente
                     if (this.dx !== 0 && this.dy !== 0) {
                         const magnitude = Math.sqrt(this.dx * this.dx + this.dy * this.dy);
-                        this.dx = (this.dx / magnitude) * this.speed;
-                        this.dy = (this.dy / magnitude) * this.speed;
+                        this.dx = (this.dx / magnitude) * currentSpeed;
+                        this.dy = (this.dy / magnitude) * currentSpeed;
                     }
 
                     this.x += this.dx;
                     this.y += this.dy;
 
-                    // Limita o jogador aos limites do campo
                     this.x = Math.max(this.radius, Math.min(gameWidth - this.radius, this.x));
                     this.y = Math.max(this.radius, Math.min(gameHeight - this.radius, this.y));
 
-                    // Atualiza o ângulo de direção com base no movimento ou na bola para a IA
                     if (!this.isAI && (this.dx !== 0 || this.dy !== 0)) {
                         this.facingAngle = Math.atan2(this.dy, this.dx);
                     } else if (this.isAI) {
                         this.facingAngle = Math.atan2(ball.y - this.y, ball.x - this.x);
                     }
 
-                    // Lógica de Drible (apenas para jogador controlável e não goleiro)
+                    // Dribble Logic
                     if (!this.isAI && !this.isGoalie && (keys['ShiftLeft'] || keys['ShiftRight'])) {
                         const distanceToBall = Math.sqrt(Math.pow(this.x - ball.x, 2) + Math.pow(this.y - ball.y, 2));
-                        const dribbleThreshold = this.radius + ball.radius + 5; // Proximidade para drible
+                        const dribbleThreshold = this.radius + ball.radius + 5;
 
                         if (distanceToBall < dribbleThreshold) {
-                            // Aplica uma força suave à bola na direção do movimento do jogador
                             ball.dx += this.dx * DRIBBLE_PUSH_FACTOR;
                             ball.dy += this.dy * DRIBBLE_PUSH_FACTOR;
                         }
@@ -593,17 +595,15 @@
                 }
             }
 
-            // Novo método para chutar a bola
             kick(ball) {
                 const distance = Math.sqrt(Math.pow(this.x - ball.x, 2) + Math.pow(this.y - ball.y, 2));
-                // Verifica se o jogador está perto da bola e se o chute não está em cooldown
                 if (distance < this.radius + ball.radius + 5 && kickCooldown <= 0) {
-                    const angle = this.facingAngle; // Chuta na direção que o jogador está olhando
+                    const angle = this.facingAngle;
 
                     ball.dx = KICK_POWER * Math.cos(angle);
                     ball.dy = KICK_POWER * Math.sin(angle);
 
-                    kickCooldown = KICK_COOLDOWN_TIME; // Inicia o cooldown
+                    kickCooldown = KICK_COOLDOWN_TIME;
                 }
             }
         }
@@ -620,14 +620,13 @@
             draw() {
                 ctx.beginPath();
                 ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
-                ctx.fillStyle = '#fff'; // Bola branca
+                ctx.fillStyle = '#fff';
                 ctx.fill();
                 ctx.strokeStyle = '#333';
                 ctx.lineWidth = 1;
                 ctx.stroke();
                 ctx.closePath();
 
-                // Desenha os gomos da bola para um visual mais FIFA-like
                 ctx.beginPath();
                 ctx.arc(this.x, this.y, this.radius * 0.7, 0, Math.PI * 2);
                 ctx.strokeStyle = '#666';
@@ -647,41 +646,46 @@
             }
 
             update() {
+                // Durante a saída de bola, a bola fica parada até ser tocada pelo time correto
+                if (isKickoffActive && !ballTouchedDuringKickoff) {
+                    this.dx = 0;
+                    this.dy = 0;
+                    // Mantém a bola no centro durante a saída de bola
+                    this.x = gameWidth / 2;
+                    this.y = gameHeight / 2;
+                    return; // Não aplica movimento ou atrito
+                }
+
                 this.x += this.dx;
                 this.y += this.dy;
 
-                // Atrito
                 this.dx *= BALL_FRICTION;
                 this.dy *= BALL_FRICTION;
 
-                // Limita a velocidade máxima da bola
                 const currentSpeed = Math.sqrt(this.dx * this.dx + this.dy * this.dy);
                 if (currentSpeed > MAX_BALL_SPEED) {
                     this.dx = (this.dx / currentSpeed) * MAX_BALL_SPEED;
                     this.dy = (this.dy / currentSpeed) * MAX_BALL_SPEED;
                 }
 
-                // Colisão com as paredes do campo (exceto áreas de gol)
                 const goalHeight = gameHeight * GOAL_HEIGHT_RATIO;
 
-                // Colisão com paredes laterais
                 if (this.x + this.radius > gameWidth) {
                     if (this.y > gameHeight / 2 - goalHeight / 2 && this.y < gameHeight / 2 + goalHeight / 2) {
-                        // Está na área do gol, não colide, espera checkGoal
+                        // In goal area, handled by checkGoal
                     } else {
                         this.dx *= -1;
                         this.x = gameWidth - this.radius;
                     }
                 } else if (this.x - this.radius < 0) {
                     if (this.y > gameHeight / 2 - goalHeight / 2 && this.y < gameHeight / 2 + goalHeight / 2) {
-                        // Está na área do gol, não colide, espera checkGoal
+                        // In goal area, handled by checkGoal
                     } else {
                         this.dx *= -1;
                         this.x = this.radius;
                     }
                 }
 
-                // Colisão com paredes superior e inferior
                 if (this.y + this.radius > gameHeight) {
                     this.dy *= -1;
                     this.y = gameHeight - this.radius;
@@ -690,14 +694,11 @@
                     this.y = this.radius;
                 }
 
-                // Colisão com os postes do gol
                 const goalPostRadius = gameHeight * GOAL_WIDTH_RATIO / 2;
 
-                // Posições dos postes do gol do jogador (direita)
                 const playerGoalPostTop = { x: gameWidth, y: gameHeight / 2 - goalHeight / 2, radius: goalPostRadius };
                 const playerGoalPostBottom = { x: gameWidth, y: gameHeight / 2 + goalHeight / 2, radius: goalPostRadius };
 
-                // Posições dos postes do gol da IA (esquerda)
                 const aiGoalPostTop = { x: 0, y: gameHeight / 2 - goalHeight / 2, radius: goalPostRadius };
                 const aiGoalPostBottom = { x: 0, y: gameHeight / 2 + goalHeight / 2, radius: goalPostRadius };
 
@@ -707,21 +708,17 @@
                     const distance = Math.sqrt(dx * dx + dy * dy);
 
                     if (distance < this.radius + post.radius) {
-                        // Colisão detectada
                         const normalX = dx / distance;
                         const normalY = dy / distance;
                         const overlap = (this.radius + post.radius) - distance;
 
-                        // Move a bola para fora da colisão
                         this.x += normalX * overlap;
                         this.y += normalY * overlap;
 
-                        // Reflete a velocidade
                         const dotProduct = this.dx * normalX + this.dy * normalY;
                         this.dx -= 2 * dotProduct * normalX;
                         this.dy -= 2 * dotProduct * normalY;
 
-                        // Aplica algum amortecimento
                         this.dx *= COLLISION_DAMPING;
                         this.dy *= COLLISION_DAMPING;
                     }
@@ -747,6 +744,8 @@
             aiScore = 0;
             updateScoreDisplay();
             kickCooldown = 0; // Reseta o cooldown ao reiniciar
+            isKickoffActive = false; // Garante que não comece em estado de kickoff
+            ballTouchedDuringKickoff = false;
         }
 
         function drawField() {
@@ -763,7 +762,7 @@
 
             // Círculo central
             ctx.beginPath();
-            ctx.arc(gameWidth / 2, gameHeight / 2, gameHeight * 0.1, 0, Math.PI * 2);
+            ctx.arc(gameWidth / 2, gameHeight / 2, gameHeight * KICKOFF_CENTER_RADIUS, 0, Math.PI * 2);
             ctx.stroke();
             ctx.closePath();
 
@@ -860,6 +859,22 @@
             // Do not resolve if velocities are separating
             if (velAlongNormal > 0) return;
 
+            // Kickoff logic: only kickoffTeam can move the ball initially
+            if (isKickoffActive && !ballTouchedDuringKickoff) {
+                const isKickoffPlayer = (kickoffTeam === 'player' && playerObj === player) ||
+                                       (kickoffTeam === 'ai' && playerObj === aiPlayer);
+                
+                if (!isKickoffPlayer) {
+                    // Opponent cannot move the ball during kickoff
+                    ballObj.dx = 0;
+                    ballObj.dy = 0;
+                    return;
+                } else {
+                    // Kickoff player touched the ball
+                    ballTouchedDuringKickoff = true;
+                }
+            }
+
             // Calculate impulse scalar
             const restitution = COLLISION_DAMPING; // Use damping as restitution
             const impulseScalar = -(1 + restitution) * velAlongNormal;
@@ -889,7 +904,9 @@
                 ball.y > gameHeight / 2 - goalHeight / 2 &&
                 ball.y < gameHeight / 2 + goalHeight / 2) {
                 aiScore++;
+                console.log("AI marcou um gol! Placar: Jogador " + playerScore + " - IA " + aiScore); // Debugging
                 updateScoreDisplay();
+                kickoffTeam = 'player'; // Player's team takes kickoff
                 resetBall();
                 if (aiScore >= 5) { // Condição de vitória simples
                     gameOver("IA Venceu!");
@@ -903,7 +920,9 @@
                 ball.y > gameHeight / 2 - goalHeight / 2 &&
                 ball.y < gameHeight / 2 + goalHeight / 2) {
                 playerScore++;
+                console.log("Jogador marcou um gol! Placar: Jogador " + playerScore + " - IA " + aiScore); // Debugging
                 updateScoreDisplay();
+                kickoffTeam = 'ai'; // AI's team takes kickoff
                 resetBall();
                 if (playerScore >= 5) { // Condição de vitória simples
                     gameOver("Você Venceu!");
@@ -926,6 +945,9 @@
             playerGoalie.y = gameHeight / 2;
             aiGoalie.y = gameHeight / 2;
             kickCooldown = 0; // Reseta o cooldown do chute
+
+            isKickoffActive = true; // Ativa o estado de saída de bola
+            ballTouchedDuringKickoff = false; // Ninguém tocou na bola ainda
         }
 
         function updateScoreDisplay() {
@@ -940,11 +962,9 @@
         }
 
         const showKickoffMessage = () => {
-            isKickoffActive = true;
             kickoffMessage.style.display = 'flex';
             setTimeout(() => {
                 kickoffMessage.style.display = 'none';
-                isKickoffActive = false;
             }, KICKOFF_DURATION);
         };
 
@@ -1292,6 +1312,7 @@
                 // Lógica de Chute do Jogador
                 if (keys['Space']) { // Tecla de chute
                     player.kick(ball);
+                    playerGoalie.kick(ball); // Goalie também pode chutar
                 }
 
                 // Lógica de Chute da IA (apenas para offline, no online o player 2 é humano)
@@ -1299,6 +1320,10 @@
                     const distanceAItoBall = Math.sqrt(Math.pow(aiPlayer.x - ball.x, 2) + Math.pow(aiPlayer.y - ball.y, 2));
                     if (distanceAItoBall < aiPlayer.radius + ball.radius + 5 && Math.random() < 0.05) {
                         aiPlayer.kick(ball);
+                    }
+                    const distanceAIGoalieToBall = Math.sqrt(Math.pow(aiGoalie.x - ball.x, 2) + Math.pow(aiGoalie.y - ball.y, 2));
+                    if (distanceAIGoalieToBall < aiGoalie.radius + ball.radius + 5 && Math.random() < 0.03) { // Chance menor para goleiro chutar
+                        aiGoalie.kick(ball);
                     }
                 }
 
